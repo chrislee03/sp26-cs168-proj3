@@ -567,6 +567,8 @@ class StudentUSocket(StudentUSocketBase):
     if (p.tcp.SYN or p.tcp.FIN or p.tcp.payload) and not retxed:
 
       ## Start of Stage 4.4 ##
+      if len(p.tcp.payload) != 0:
+        self.snd.nxt = self.snd.nxt |PLUS| len(p.tcp.payload)
 
       ## End of Stage 4.4 ##
       pass
@@ -602,24 +604,25 @@ class StudentUSocket(StudentUSocketBase):
     elif self.state in (ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2,
                         CLOSE_WAIT, CLOSING, LAST_ACK, TIME_WAIT):
       if self.acceptable_seg(seg, payload):
-        ## Start of Stage 2.1 ##
-        if seg.seq |EQ| self.rcv.nxt:
-          self.handle_accepted_seg(seg, payload)
-        else:
-          self.set_pending_ack()
+        self.rx_queue.push(p)
+
+
+      while not self.rx_queue.empty():
+        s, p = self.rx_queue.peek()
         
-        ## End of Stage 2.1 ##
-        ## Start of Stage 3.1 ##
-        # you may need to remove Stage 2's code.
+        if s |GT| self.rcv.nxt: 
+          self.set_pending_ack()
+          break
 
-        ## End of Stage 3.1 ##
-      else:
-        self.set_pending_ack()
+        s,queued_p = self.rx_queue.pop()
+        queued_seg = queued_p.tcp
+        queued_payload = queued_p.app
 
-     
-    ## Start of Stage 3.2 ##
-    # checking recv queue
-    # Hint: data = packet.app[self.rcv.nxt |MINUS| packet.tcp.seq:]
+        # DEAL WITH OVERLAPPING BYTES
+        if s |LT| self.rcv.nxt:
+          queue_payload = queue_payload[self.rcv.nxt |MINUS| s:]
+        
+        self.handle_accepted_seg(queued_seg, queued_payload)
 
     ## End of Stage 3.2 ##
 
@@ -713,7 +716,7 @@ class StudentUSocket(StudentUSocketBase):
     """
 
     ## Start of Stage 5.1 ##
-    self.snd.wnd = self.TX_DATA_MAX # remove when implemented
+    self.snd.wnd = seg.win # remove when implemented
     self.snd.wl1 = seg.seq
     self.snd.wl2 = seg.ack
 
@@ -781,6 +784,18 @@ class StudentUSocket(StudentUSocketBase):
     if self.state in (ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, CLOSE_WAIT, CLOSING):
       ## Start of Stage 4.1 ##
 
+      # Check if ack number represents unacked packet
+      if seg.ack |GT| self.snd.una and seg.ack |LE| self.snd.nxt:
+        self.handle_accepted_ack(seg)
+
+      # Drop packet if previously acked but continue
+      elif seg.ack |LT| self.snd.una:
+        continue_after_ack = False
+
+      # If ack represents packet not sent then drop and don't continue
+      elif seg.ack |GT| self.snd.nxt: 
+        return False
+
       ## End of Stage 4.1 ##
 
       if snd.una |LE| seg.ack and seg.ack |LE| snd.nxt:
@@ -819,6 +834,8 @@ class StudentUSocket(StudentUSocketBase):
     snd = self.snd
     rcv = self.rcv
 
+    self.snd.una = seg.ack
+
     assert not seg.SYN
     if not seg.ACK:
       return
@@ -850,11 +867,24 @@ class StudentUSocket(StudentUSocketBase):
     bytes_sent = 0
 
     ## Start of Stage 4.3 ##
-    remaining = 0
+    remaining = snd.wnd - (snd.nxt |MINUS| snd.una)
+    
     while remaining > 0:
+      # No more data to send out
+      if len(self.tx_data) == 0:
+        break
+
+      amount = min(len(self.tx_data), remaining, self.mss)
+      payload = self.tx_data[:amount]
+
+      p = self.new_packet(ack=True, data=payload, syn=False)
+      self.tx(p)
+
+      self.tx_data = self.tx_data[amount:]
 
       num_pkts += 1
       bytes_sent += len(payload)
+      remaining -= bytes_sent
 
     self.log.debug("sent {0} packets with {1} bytes total".format(num_pkts, bytes_sent))
     ## End of Stage 4.3 ##
