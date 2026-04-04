@@ -542,7 +542,13 @@ class StudentUSocket(StudentUSocketBase):
     self.bind(dev.ip_addr, 0)
 
     ## Start of Stage 1.1 ##
+    self.snd.nxt = self.snd.iss
 
+    syn_packet = self.new_packet(ack=False, data=None, syn=True)
+    self.tx(syn_packet)
+
+    self.state = SYN_SENT
+    self.snd.nxt = self.snd.nxt |PLUS| 1
     ## End of Stage 1.1 ##
 
   def tx(self, p, retxed=False):
@@ -589,15 +595,20 @@ class StudentUSocket(StudentUSocketBase):
     if self.state is CLOSED:
       return
     ## Start of Stage 1.2 ##
+    if self.state is SYN_SENT:
+      self.handle_synsent(seg)
 
     ## End of Stage 1.2 ##
     elif self.state in (ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2,
                         CLOSE_WAIT, CLOSING, LAST_ACK, TIME_WAIT):
       if self.acceptable_seg(seg, payload):
         ## Start of Stage 2.1 ##
+        if seg.seq |EQ| self.rcv.nxt:
+          self.handle_accepted_seg(seg, payload)
+        else:
+          self.set_pending_ack()
         
         ## End of Stage 2.1 ##
-        pass
         ## Start of Stage 3.1 ##
         # you may need to remove Stage 2's code.
 
@@ -644,9 +655,15 @@ class StudentUSocket(StudentUSocketBase):
 
     if acceptable_ack:
       ## Start of Stage 1.3 ##
+      self.rcv.nxt = seg.seq |PLUS| 1
+      self.snd.una = seg.ack
 
       if self.snd.una |GT| self.snd.iss:
-        pass
+        self.snd.nxt = seg.ack
+        self.state = ESTABLISHED
+
+        self.set_pending_ack()
+        self.update_window(seg)
 
       ## End of Stage 1.3 ##
 
@@ -678,6 +695,12 @@ class StudentUSocket(StudentUSocketBase):
       payload = payload[:rcv.wnd] # Chop to size!
 
     ## Start of Stage 2.3 ##
+    self.rcv.nxt = self.rcv.nxt |PLUS| len(payload)
+    self.rcv.wnd = self.rcv.wnd |MINUS| len(payload)
+
+    self.rx_data += payload
+
+    self.set_pending_ack()
 
     ## End of Stage 2.3 ##
 
@@ -805,6 +828,8 @@ class StudentUSocket(StudentUSocketBase):
       return
 
     ## Start of Stage 2.2 ##
+    if self.state in [ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2] and len(payload) != 0:
+      self.handle_accepted_payload(payload)
 
     ## End of Stage 2.2 ##
 
